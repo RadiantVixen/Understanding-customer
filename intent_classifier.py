@@ -1,12 +1,3 @@
-"""Train and use RNN, LSTM, and optional BERT intent classifiers.
-
-Run ``python intent_classifier.py`` from the project root after placing the
-assignment files in ``data/``. The script writes ``model.pkl`` and
-``intents.csv``.
-"""
-
-from __future__ import annotations
-
 import argparse
 import pickle
 import random
@@ -15,7 +6,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
-
 import numpy as np
 import pandas as pd
 import torch
@@ -24,8 +14,6 @@ from sklearn.model_selection import train_test_split
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-if __name__ == "__main__":
-    sys.modules.setdefault("intent_classifier", sys.modules[__name__])
 
 SEED = 42
 FALLBACK_INTENT = "Fallback Intent"
@@ -40,34 +28,6 @@ def seed_everything(seed: int = SEED) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def find_column(frame: pd.DataFrame, candidates: Iterable[str], kind: str) -> str:
-    normalized = {str(column).strip().lower(): column for column in frame.columns}
-    for candidate in candidates:
-        if candidate in normalized:
-            return normalized[candidate]
-    if kind == "text":
-        for column in frame.columns:
-            if frame[column].dtype == "object":
-                return column
-    raise ValueError(f"Could not identify the {kind} column. Found: {list(frame.columns)}")
-
-
-def load_data(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
-    train_path = next((data_dir / name for name in ("intents_train.csv", "train.csv") if (data_dir / name).exists()), None)
-    test_path = next((data_dir / name for name in ("intents_test.csv", "test.csv") if (data_dir / name).exists()), None)
-    if train_path is None or test_path is None:
-        raise FileNotFoundError("Put intents_train.csv and intents_test.csv in the data/ directory.")
-    train = pd.read_csv(train_path)
-    test = pd.read_csv(test_path)
-    text_column = find_column(train, ("text", "phrase", "utterance", "query", "sentence", "question"), "text")
-    label_column = find_column(train, ("intent", "label", "category", "class"), "label")
-    test_text_column = text_column if text_column in test else find_column(test, ("text", "phrase", "utterance", "query", "sentence", "question"), "text")
-    train = train[[text_column, label_column]].dropna().rename(columns={text_column: "text", label_column: "label"})
-    test = test[[test_text_column]].fillna("").rename(columns={test_text_column: "text"})
-    train["text"] = train["text"].astype(str)
-    test["text"] = test["text"].astype(str)
-    train["label"] = train["label"].astype(str)
-    return train, test, text_column, label_column
 
 
 def tokenize(text: str) -> list[str]:
@@ -94,9 +54,6 @@ class Vocabulary:
         return ids + [0] * (max_length - len(ids))
 
 
-if __name__ == "__main__":
-    Vocabulary.__module__ = "intent_classifier"
-
 
 class SequenceClassifier(nn.Module):
     def __init__(self, vocabulary_size: int, class_count: int, architecture: str, embedding_dim: int = 96, hidden_dim: int = 96):
@@ -113,32 +70,6 @@ class SequenceClassifier(nn.Module):
         pooled = torch.cat((hidden[-2], hidden[-1]), dim=1)
         return self.output(self.dropout(pooled))
 
-
-@dataclass
-class SavedModel:
-    architecture: str
-    vocabulary: Vocabulary
-    labels: list[str]
-    max_length: int
-    model_state: dict
-    fallback_threshold: float
-    embedding_dim: int = 96
-    hidden_dim: int = 96
-
-    def predict(self, texts: Iterable[str]) -> tuple[list[str], np.ndarray]:
-        model = SequenceClassifier(len(self.vocabulary.token_to_id), len(self.labels), self.architecture, self.embedding_dim, self.hidden_dim)
-        model.load_state_dict(self.model_state)
-        model.eval()
-        encoded = torch.tensor([self.vocabulary.encode(text, self.max_length) for text in texts], dtype=torch.long)
-        with torch.no_grad():
-            probabilities = torch.softmax(model(encoded), dim=1).numpy()
-        indexes = probabilities.argmax(axis=1)
-        predictions = [self.labels[index] if probabilities[row, index] >= self.fallback_threshold else FALLBACK_INTENT for row, index in enumerate(indexes)]
-        return predictions, probabilities
-
-
-if __name__ == "__main__":
-    SavedModel.__module__ = "intent_classifier"
 
 
 def encode_labels(labels: pd.Series) -> tuple[list[str], dict[str, int]]:
@@ -177,16 +108,17 @@ def train_architecture(train_texts: list[str], train_labels: list[int], validati
 
 def train(data_dir: Path, output_dir: Path, epochs: int, batch_size: int) -> None:
     seed_everything()
-    train_frame, test_frame, _, _ = load_data(data_dir)
-    labels, label_ids = encode_labels(train_frame["label"])
-    stratify_labels = train_frame["label"] if train_frame["label"].value_counts().min() >= 2 else None
+    train = pd.read_csv("data/intents_train.csv")
+    test = pd.read_csv("data/intents_test.csv")
+    labels, label_ids = encode_labels(train["intent"])
+    stratify_labels = train["intent"] if train["intent"].value_counts().min() >= 2 else None
     train_texts, validation_texts, train_labels, validation_labels = train_test_split(
-        train_frame["text"].tolist(), [label_ids[label] for label in train_frame["label"]],
+        train["text"].tolist(), [label_ids[label] for label in train["intent"]],
         test_size=0.2, random_state=SEED, stratify=stratify_labels,
     )
     vocabulary = Vocabulary()
     vocabulary.fit(train_texts)
-    max_length = min(40, max(8, max(len(tokenize(text)) for text in train_frame["text"])))
+    max_length = min(40, max(8, max(len(tokenize(text)) for text in train["text"])))
     results = {}
     for architecture in ("rnn", "lstm"):
         model, validation_accuracy = train_architecture(train_texts, train_labels, validation_texts, validation_labels, vocabulary, architecture, max_length, epochs, batch_size, len(labels))
@@ -200,26 +132,12 @@ def train(data_dir: Path, output_dir: Path, epochs: int, batch_size: int) -> Non
         validation_probabilities = torch.softmax(selected_model(validation_x), dim=1).numpy()
     correct_confidences = validation_probabilities[np.arange(len(validation_labels)), validation_labels]
     fallback_threshold = float(max(0.45, np.quantile(correct_confidences, 0.05)))
-    artifact = SavedModel(architecture, vocabulary, labels, max_length, selected_model.state_dict(), fallback_threshold)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    with (output_dir / "model.pkl").open("wb") as handle:
-        pickle.dump(artifact, handle)
-    predictions, _ = artifact.predict(test_frame["text"].tolist())
+    indexes = validation_probabilities.argmax(axis=1)
+    predictions = [labels[index] if validation_probabilities[row, index] >= fallback_threshold else FALLBACK_INTENT for row, index in enumerate(indexes)]
     pd.DataFrame({"intent": predictions}).to_csv(output_dir / "intents.csv", index=False)
-    validation_predictions = validation_probabilities.argmax(axis=1)
     print(f"Selected model: {architecture.upper()}")
     print(f"Validation accuracy: {validation_accuracy:.3f}")
-    print(classification_report(validation_labels, validation_predictions, labels=list(range(len(labels))), target_names=labels, zero_division=0))
-    print(f"Wrote {output_dir / 'model.pkl'} and {output_dir / 'intents.csv'}")
-
-
-def predict(model_path: Path, input_path: Path, output_path: Path) -> None:
-    with model_path.open("rb") as handle:
-        artifact: SavedModel = pickle.load(handle)
-    frame = pd.read_csv(input_path)
-    text_column = find_column(frame, ("text", "phrase", "utterance", "query", "sentence", "question"), "text")
-    predictions, _ = artifact.predict(frame[text_column].fillna("").astype(str).tolist())
-    pd.DataFrame({"intent": predictions}).to_csv(output_path, index=False)
+    print(f"Wrote {output_dir / 'intents.csv'}")
 
 
 def main() -> None:
@@ -228,12 +146,8 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("."))
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--predict", action="store_true", help="Use an existing model.pkl instead of training")
     args = parser.parse_args()
-    if args.predict:
-        predict(args.output_dir / "model.pkl", args.data_dir / "intents_test.csv", args.output_dir / "intents.csv")
-    else:
-        train(args.data_dir, args.output_dir, args.epochs, args.batch_size)
+    train(args.data_dir, args.output_dir, args.epochs, args.batch_size)
 
 
 if __name__ == "__main__":
