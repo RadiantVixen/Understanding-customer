@@ -38,7 +38,7 @@ class Vocabulary:
         self.max_size = max_size
         self.token_to_id = {"<pad>": 0, "<unk>": 1}
 
-    def fit(self, texts: Iterable[str]) -> None:
+    def fit(self, texts) -> None:
         counts: dict[str, int] = {}
         for text in texts:
             for token in tokenize(text):
@@ -150,3 +150,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+    
